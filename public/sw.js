@@ -1,5 +1,5 @@
 // ── Billing Dashboard Service Worker ──────────────────────────
-const CACHE = 'schbang-martech-v1';
+const CACHE = 'schbang-martech-v2';
 
 self.addEventListener('install', e => { self.skipWaiting(); });
 self.addEventListener('activate', e => { e.waitUntil(clients.claim()); });
@@ -28,8 +28,8 @@ self.addEventListener('push', e => {
       }
     } catch(e) {}
 
-    const icon  = dept === 'martech' ? '/icon-192-martech.png' : '/icon-192.png';
-    const badge = dept === 'martech' ? '/badge-96-martech.png'  : '/badge-96.png';
+    const icon  = '/icon-192.png';
+    const badge = '/badge-96.png';
     const url   = dept === 'martech' ? '/' : '/';
 
     const opts = {
