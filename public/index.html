@@ -492,17 +492,20 @@ function setSubView(v){
 
 function buildChips(){
   const items = MONTHS.map((m,i) => {
-    const short = cap(m).replace(/['\s]/g,'').slice(0,6);
+    const short = cap(m).replace(/[']/g,'').replace(/\s+/g,' ').trim();
+    // Extract month and year separately for the pill
+    const parts = short.match(/([A-Za-z]+)\s*(\d+)/);
+    const mon = parts ? parts[1].slice(0,3).toUpperCase() : short.slice(0,3).toUpperCase();
+    const yr  = parts ? "'"+parts[2].slice(-2) : '';
     return `<div class="tl-item" id="tl-${i}" onclick="clickMonth(${i})">
-      <div class="tl-line"></div>
-      <div class="tl-dot has-data" id="tl-dot-${i}"></div>
-      <div class="tl-label">${short}</div>
-      <div class="tl-amt" id="tl-amt-${i}">—</div>
+      <div class="tl-pill" id="tl-dot-${i}">
+        <span class="tl-label">${mon}${yr}</span>
+        <span class="tl-amt" id="tl-amt-${i}"></span>
+      </div>
     </div>`;
   }).join('');
   document.getElementById('mchips').innerHTML=`<div class="timeline-wrap">${items}</div>`;
-  gsap.from('.tl-item',{opacity:0,y:20,stagger:.08,duration:.5,ease:'back.out(1.5)',delay:.1,clearProps:'all'});
-  gsap.from('.tl-line',{scaleX:0,transformOrigin:'left',stagger:.08,duration:.4,ease:'power2.out',delay:.2});
+  gsap.from('.tl-item',{opacity:0,y:10,stagger:.06,duration:.4,ease:'back.out(1.5)',delay:.1,clearProps:'all'});
 }
 
 function updateTimelineAmt(idx, amt){
