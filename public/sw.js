@@ -1,11 +1,11 @@
 // ── Billing Dashboard Service Worker ──────────────────────────
-const CACHE = 'schbang-martech-v2';
+const CACHE = 'schbang-tech-v2';
 
 self.addEventListener('install', e => { self.skipWaiting(); });
 self.addEventListener('activate', e => { e.waitUntil(clients.claim()); });
 
 // The dept this SW instance belongs to (passed at registration: /sw.js?dept=tech)
-const SW_DEPT = 'martech';
+const SW_DEPT = 'tech';
 
 // Push received — fetch latest notification payload and show a rich notification
 self.addEventListener('push', e => {
@@ -28,8 +28,8 @@ self.addEventListener('push', e => {
       }
     } catch(e) {}
 
-    const icon  = '/icon-192.png';
-    const badge = '/badge-96.png';
+    const icon  = dept === 'martech' ? '/icon-192-martech.png' : '/icon-192.png';
+    const badge = dept === 'martech' ? '/badge-96-martech.png'  : '/badge-96.png';
     const url   = dept === 'martech' ? '/' : '/';
 
     const opts = {
