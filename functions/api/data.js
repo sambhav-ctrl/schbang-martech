@@ -10,7 +10,7 @@ const HIERARCHY = {
     'Akshay': {
       'Bhargava': ['fevicreate','lnt realty'],
       'Jayesh':   ['loreal','shriram life'],
-      'Tanisha':  ['cadilla','glow','bridgestone','reddy','better bath','dhp','usv'],
+      'Tanisha':  ['cadila','glow','bridgestone','reddy','better bath','dhp','usv'],
       'Tarini':   ['britannia']
     },
     'Carolyn': {
@@ -50,6 +50,18 @@ function parseAmt(val) {
 }
 function norm(s) { return String(s||"").toLowerCase().trim(); }
 
+// Convert column index (0-based) to letter(s): 0=A, 1=B, 25=Z, 26=AA etc.
+function colLetter(idx) {
+  let s = "";
+  idx++;
+  while (idx > 0) {
+    idx--;
+    s = String.fromCharCode(65 + (idx % 26)) + s;
+    idx = Math.floor(idx / 26);
+  }
+  return s;
+}
+
 function monthSortKey(name) {
   const s = norm(name).replace(/['\s]/g,"");
   for (let i = 0; i < MONTH_ORDER.length; i++) {
@@ -87,19 +99,175 @@ async function fetchSheetMeta(sheetId, apiKey) {
   return (data.sheets||[]).map(s => s.properties.title);
 }
 
+// ── Rewritten: handles multi-column unbilled sheet ──────────
+// Structure: Col A = brands, Col B onwards = one col per month, last col = comment
+// Row 2 (index 1) = header: "Retainer | Apr'26 | May'26 | Jun'26 | Comment"
+// We find the column matching tabName, and comment is always the column after the LAST month col
 async function getUnbilledRows(sheetId, tabName, apiKey) {
-  const rows = await fetchSheet(sheetId, tabName, apiKey, 'C');
+  // Fetch wide enough to cover many months (A to Z covers 26 cols = 24 months + brand + comment)
+  const rows = await fetchSheet(sheetId, tabName, apiKey, 'Z');
+  if (!rows.length) return {};
+
+  // Find header row (contains "retainer" in col A)
+  let headerRowIdx = -1;
+  for (let i = 0; i < rows.length; i++) {
+    if (norm(rows[i][0]) === "retainer") { headerRowIdx = i; break; }
+  }
+  if (headerRowIdx === -1) return {};
+
+  const header = rows[headerRowIdx];
+
+  // Find which column matches the requested month tab name
+  // Match by month+year: extract month prefix and year digits, compare both
+  const normTab = norm(tabName).replace(/['\s]/g,"");
+  // Extract month name from tab (e.g. "may26" -> "may", "26")
+  const tabMonth = MONTH_ORDER.find(m => normTab.startsWith(m)) || "";
+  const tabYear  = normTab.replace(tabMonth,"").replace(/\D/g,""); // digits only e.g. "26" or "2026"
+  const tabYear4 = tabYear.length === 2 ? "20"+tabYear : tabYear;  // normalise to 4-digit year
+
+  let monthColIdx = -1;
+  let lastMonthColIdx = -1;
+
+  for (let c = 1; c < header.length; c++) {
+    const h = norm(header[c]).replace(/['\s]/g,"");
+    if (!h) continue;
+    // Check if this column is a month column (starts with a known month name)
+    const colMonth = MONTH_ORDER.find(m => h.startsWith(m));
+    if (!colMonth) continue;
+    lastMonthColIdx = c;
+    // Extract year from column header
+    const colYear  = h.replace(colMonth,"").replace(/\D/g,"");
+    const colYear4 = colYear.length === 2 ? "20"+colYear : colYear;
+    // Match if same month AND same year (ignoring 2-digit vs 4-digit difference)
+    if (colMonth === tabMonth && colYear4 === tabYear4) {
+      monthColIdx = c;
+    }
+  }
+
+  if (monthColIdx === -1) return {};
+
+  // Comment column is always immediately after the last month column
+  const commentColIdx = lastMonthColIdx + 1;
+
   const map = {};
-  let started = false;
-  for (const row of rows) {
-    if (!started) { if (norm(row[0]) === "retainer") { started = true; continue; } continue; }
+  for (let i = headerRowIdx + 1; i < rows.length; i++) {
+    const row = rows[i];
     const brand = String(row[0]||"").trim();
-    const amount = parseAmt(row[1]);
-    const comment = String(row[2]||"").trim();
-    if (!brand || norm(brand) === "total" || !amount) continue;
-    map[norm(brand)] = { brand, amount, comment: comment || "No comment — pending" };
+    if (!brand || norm(brand) === "total") continue;
+    const amount  = parseAmt(row[monthColIdx]);
+    const comment = String(row[commentColIdx]||"").trim();
+    const isBilled = norm(comment).startsWith("billed");
+    map[norm(brand)] = {
+      brand,
+      amount,
+      comment: isBilled ? "Billed" : (comment || "")
+    };
   }
   return map;
+}
+
+// Returns { brandKey: consecutiveMonthCount } for all brands unbilled in currentMonth
+// Looks back through previousMonths (sorted oldest→newest, currentMonth last)
+async function getUnbilledStreaks(sheetId, allTabs, currentMonth, apiKey) {
+  // The unbilled sheet has ONE tab with multiple month columns.
+  // allTabs contains the tab names from the unbilled sheet (likely just one tab).
+  // We need to read each month's column from that single tab.
+  // We pass the MONTH NAME (not the tab name) to getUnbilledRows so it finds the right column.
+
+  // Build a list of all month names to check, sorted chronologically up to currentMonth
+  // We use allTabs from the ESTIMATE sheet (which has one tab per month) as the month list
+  // But since allTabs here is from the UNBILLED sheet (one tab), we need a different approach:
+  // Just read the single unbilled tab and extract all month columns at once.
+
+  if (!allTabs.length) return {};
+
+  // Find the tab that matches currentMonth — that tab has all month columns
+  // (each monthly tab contains the full multi-column history)
+  const normCurTab = norm(currentMonth).replace(/['\s]/g,"");
+  const curTabMonth = MONTH_ORDER.find(m => normCurTab.startsWith(m)) || "";
+  const curTabYear  = normCurTab.replace(curTabMonth,"").replace(/\D/g,"");
+  const curTabYear4 = curTabYear.length === 2 ? "20"+curTabYear : curTabYear;
+
+  const unbilledTab = allTabs.find(t => {
+    const nt = norm(t).replace(/['\s]/g,"");
+    const tm = MONTH_ORDER.find(m => nt.startsWith(m)) || "";
+    const ty = nt.replace(tm,"").replace(/\D/g,"");
+    const ty4 = ty.length === 2 ? "20"+ty : ty;
+    return tm === curTabMonth && ty4 === curTabYear4;
+  }) || allTabs[allTabs.length - 1]; // fallback to last tab
+
+  const rows = await fetchSheet(sheetId, unbilledTab, apiKey, 'Z').catch(() => []);
+  if (!rows.length) return {};
+
+  // Find header row
+  let headerRowIdx = -1;
+  for (let i = 0; i < rows.length; i++) {
+    if (norm(rows[i][0]) === "retainer") { headerRowIdx = i; break; }
+  }
+  if (headerRowIdx === -1) return {};
+
+  const header = rows[headerRowIdx];
+
+  // Find all month columns in order
+  const monthCols = []; // [{month: "may", year4: "2026", colIdx: 2}, ...]
+  for (let c = 1; c < header.length; c++) {
+    const h = norm(header[c]).replace(/['\s]/g,"");
+    if (!h) continue;
+    const colMonth = MONTH_ORDER.find(m => h.startsWith(m));
+    if (!colMonth) continue;
+    const colYear  = h.replace(colMonth,"").replace(/\D/g,"");
+    const colYear4 = colYear.length === 2 ? "20"+colYear : colYear;
+    monthCols.push({ month: colMonth, year4: colYear4, colIdx: c, sortKey: monthSortKey(colMonth+colYear4) });
+  }
+
+  if (!monthCols.length) return {};
+  monthCols.sort((a,b) => a.sortKey - b.sortKey);
+
+  // Find current month index in monthCols
+  const normCur = norm(currentMonth).replace(/['\s]/g,"");
+  const curMonth = MONTH_ORDER.find(m => normCur.startsWith(m)) || "";
+  const curYear  = normCur.replace(curMonth,"").replace(/\D/g,"");
+  const curYear4 = curYear.length === 2 ? "20"+curYear : curYear;
+  const curIdx   = monthCols.findIndex(mc => mc.month === curMonth && mc.year4 === curYear4);
+
+  if (curIdx <= 0) return {}; // no previous months
+
+  // Build per-month brand maps from brand rows
+  const relevantCols = monthCols.slice(0, curIdx + 1);
+  const brandMaps = relevantCols.map(() => ({}));
+
+  for (let i = headerRowIdx + 1; i < rows.length; i++) {
+    const row = rows[i];
+    const brand = String(row[0]||"").trim();
+    if (!brand || norm(brand) === "total") continue;
+    const key = norm(brand);
+    // Comment col = col after last month col
+    const lastColIdx = monthCols[monthCols.length - 1].colIdx;
+    const comment = String(row[lastColIdx + 1]||"").trim();
+    const isBilled = norm(comment).startsWith("billed");
+
+    relevantCols.forEach((mc, mi) => {
+      const amount = parseAmt(row[mc.colIdx]);
+      brandMaps[mi][key] = { brand, amount, comment: isBilled ? "Billed" : (comment || "") };
+    });
+  }
+
+  // Count consecutive unbilled months going backwards from current
+  const currentMap = brandMaps[brandMaps.length - 1];
+  const streaks = {};
+  for (const key of Object.keys(currentMap)) {
+    const cur = currentMap[key];
+    if (cur.comment === "Billed") continue;
+    if (!cur.amount || cur.amount <= 0) continue;
+    let count = 0;
+    for (let i = brandMaps.length - 1; i >= 0; i--) {
+      const m = brandMaps[i];
+      if (m[key] && m[key].amount > 0 && m[key].comment !== "Billed") count++;
+      else break;
+    }
+    if (count >= 2) streaks[key] = count;
+  }
+  return streaks;
 }
 
 async function getEstimateMap(sheetId, tabName, dept, apiKey, isApril) {
@@ -115,7 +283,7 @@ async function getEstimateMap(sheetId, tabName, dept, apiKey, isApril) {
     if (norm(row[0]) !== dept) continue;
     const brand = String(row[1]||"").trim();
     if (!brand) continue;
-    map[norm(brand)] = { status: norm(row[3]) || "no", date: row[4]||"", value: parseAmt(row[5]) };
+    map[norm(brand)] = { status: norm(row[3]) || "no", date: row[4]||"", value: parseAmt(row[5]), retainerBase: parseAmt(row[2]) };
   }
   return map;
 }
@@ -288,18 +456,64 @@ async function getSummaryData(vasSheetId, apiKey) {
   return { monthlyUnbilled, estInvRatio, totals, _debug: { tab: summaryTab, rowCount: rows.length } };
 }
 
+// Statuses shown even without a retainer amount this month
+const INACTIVE_STATUSES = ["exit", "on pause", "not started yet"];
+
 function mergeRows(unbilledMap, estMap, dept, isApril) {
-  const allKeys = {};
-  Object.keys(unbilledMap).forEach(k => allKeys[k] = true);
-  Object.keys(estMap).forEach(k => allKeys[k] = true);
-  return Object.keys(allKeys).map(key => {
-    const u = unbilledMap[key], e = estMap[key];
+  const rows = [];
+
+  // 1. All brands in the unbilled sheet this month — these are the live unbilled brands
+  Object.keys(unbilledMap).forEach(key => {
+    const u = unbilledMap[key];
+    const e = estMap[key];
     const status = isApril ? (e ? e.status : "yes") : (e ? e.status : "no");
-    const owner = findOwner(u ? u.brand : key, dept);
-    return { brand: u ? u.brand : key.replace(/\b\w/g, c => c.toUpperCase()),
-      amount: u ? u.amount : 0, comment: u ? u.comment : "—",
-      status, date: e?.date||"", value: e?.value||0, gam: owner.gam, am: owner.am };
-  }).sort((a,b) => a.brand.localeCompare(b.brand));
+    const owner = findOwner(u.brand, dept);
+    const isBilled = u.comment === "Billed"; // only billed if explicitly marked in col C
+    rows.push({
+      brand:        u.brand,
+      amount:       u.amount,
+      comment:      isBilled ? "Billed" : (u.comment || ""),
+      status,
+      date:         e?.date || "",
+      value:        e?.value || 0,
+      retainerBase: e?.retainerBase || 0,
+      gam:          owner.gam,
+      am:           owner.am,
+      inactive:     false
+    });
+  });
+
+  // 2. Brands in estimate sheet but NOT in unbilled sheet
+  //    Only show if status is on pause / not started yet / exit
+  //    All other absent brands simply have no retainer this month — don't show
+  Object.keys(estMap).forEach(key => {
+    if (unbilledMap[key]) return; // already handled above
+    const e = estMap[key];
+    const status = e.status;
+    if (!INACTIVE_STATUSES.includes(status)) return;
+    const owner = findOwner(key, dept);
+    const brandName = key.replace(/\w/g, c => c.toUpperCase());
+    rows.push({
+      brand:        brandName,
+      amount:       0,
+      comment:      "",
+      status,
+      date:         e.date || "",
+      value:        e.value || 0,
+      retainerBase: e.retainerBase || 0,
+      gam:          owner.gam,
+      am:           owner.am,
+      inactive:     true
+    });
+  });
+
+  return rows.sort((a, b) => {
+    // Order: active unbilled → inactive → billed
+    const aOrder = a.comment === "Billed" ? 2 : (a.inactive ? 1 : 0);
+    const bOrder = b.comment === "Billed" ? 2 : (b.inactive ? 1 : 0);
+    if (aOrder !== bOrder) return aOrder - bOrder;
+    return a.brand.localeCompare(b.brand);
+  });
 }
 
 function vasLookup(vasData, brandName) {
@@ -439,12 +653,18 @@ export async function onRequest(context) {
     // ── Month ─────────────────────────────────────────────────
     const month   = p.month;
     const isApril = norm(month).replace(/[\s']/g,"").includes("apr");
-    const [um, em, vasData] = await Promise.all([
+    const [um, em, vasData, allUnbilledTabs] = await Promise.all([
       getUnbilledRows(UNBILLED_ID, month, API_KEY).catch(()=>({})),
       getEstimateMap(ESTIMATE_ID, month, dept, API_KEY, isApril).catch(()=>({})),
-      VAS_ID ? getVASData(VAS_ID, dept, API_KEY) : Promise.resolve({ currentData:{}, lastData:{} })
+      VAS_ID ? getVASData(VAS_ID, dept, API_KEY) : Promise.resolve({ currentData:{}, lastData:{} }),
+      fetchSheetMeta(UNBILLED_ID, API_KEY).catch(()=>[])
     ]);
     const rows            = mergeRows(um, em, dept, isApril);
+    // Attach consecutive unbilled streak to each row
+    const streaks = await getUnbilledStreaks(UNBILLED_ID, allUnbilledTabs, month, API_KEY).catch(()=>({}));
+    rows.forEach(r => { r.streak = streaks[norm(r.brand)] || 0; });
+    // Total retainer base = sum of monthly value from estimate sheet for all active brands
+    const retainerBase    = Object.values(em).filter(e => !INACTIVE_STATUSES.includes(norm(e.status))).reduce((s,e) => s + (e.retainerBase||0), 0);
     const vasCurrentTotal = Object.values(vasData.currentData).reduce((s,v) => s+v.total, 0);
     const vasLastTotal    = Object.values(vasData.lastData).reduce((s,v) => s+(v?.total||0), 0);
 
@@ -458,7 +678,7 @@ export async function onRequest(context) {
       return { brand: v.brand, gam, am, currentVAS: v.total, lastFY };
     }).filter(v => v.currentVAS > 0);
 
-    return new Response(JSON.stringify({ rows, month, hierarchy: HIERARCHY[dept]||{}, vasCurrentTotal, vasLastTotal, vasBrands }), { headers });
+    return new Response(JSON.stringify({ rows, month, retainerBase, hierarchy: HIERARCHY[dept]||{}, vasCurrentTotal, vasLastTotal, vasBrands }), { headers });
 
   } catch(err) {
     return new Response(JSON.stringify({ error: err.message }), { status: 500, headers });
